@@ -5,6 +5,8 @@ import os
 import re
 import requests
 import sqlite3
+from dateutil import parser
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from pathlib import Path
 from requests.auth import HTTPBasicAuth
@@ -29,7 +31,7 @@ def init_db(db_path):
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS posts
-                 (id TEXT PRIMARY KEY, caption TEXT, media_type TEXT, permalink TEXT, posted_to_wp INTEGER DEFAULT 0)''')
+                 (id TEXT PRIMARY KEY, caption TEXT, media_type TEXT, permalink TEXT, timestamp TEXT, posted_to_wp INTEGER DEFAULT 0)''')
     c.execute('''CREATE TABLE IF NOT EXISTS media
                  (media_id TEXT PRIMARY KEY, post_id TEXT, media_type TEXT, media_url TEXT, local_path TEXT,
                   wp_media_id INTEGER, wp_url TEXT,
@@ -45,7 +47,7 @@ def fetch_instagram_posts(access_token, conn, verbose=False):
     c.execute("SELECT id FROM posts")
     existing_ids = set(row[0] for row in c.fetchall())
     posts = []
-    url = f'https://graph.instagram.com/me/media?fields=id,caption,media_type,media_url,permalink&access_token={access_token}'
+    url = f'https://graph.instagram.com/me/media?fields=id,caption,media_type,media_url,permalink,timestamp&access_token={access_token}'
     page = 1
     while url:
         if verbose:
@@ -100,8 +102,8 @@ def download_media(media_url, local_path, verbose=False):
 def insert_post(conn, post):
     """Insert a post into the database."""
     c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO posts (id, caption, media_type, permalink, posted_to_wp) VALUES (?, ?, ?, ?, 0)",
-              (post['id'], post.get('caption', ''), post['media_type'], post['permalink']))
+    c.execute("INSERT OR IGNORE INTO posts (id, caption, media_type, permalink, timestamp, posted_to_wp) VALUES (?, ?, ?, ?, ?, 0)",
+              (post['id'], post.get('caption', ''), post['media_type'], post['permalink'], post.get('timestamp', '')))
     conn.commit()
 
 def insert_media(conn, media_id, post_id, media_type, media_url):
@@ -174,11 +176,11 @@ def handle_media(conn, media_list, verbose=False):
 
 def format_caption(caption):
     """Format caption by removing tags and adding paragraph blocks."""
-    caption = remove_tags(caption)  # Assume this removes unwanted HTML tags
-    lines = caption.split('\n')     # Split caption into lines
+    caption = remove_tags(caption)
+    lines = caption.split('\n')
     formatted = ''
     for line in lines:
-        if line.strip():  # Only process non-empty lines
+        if line.strip():
             formatted += f'<!-- wp:paragraph --><p>{line.strip()}</p><!-- /wp:paragraph -->'
     return formatted
 
@@ -187,19 +189,19 @@ def build_content(media_list, wp_media_map, caption, first_image_id):
     content = ''
     for media in media_list:
         media_id, media_type, _, _, _ = media
-        if media_id in wp_media_map and media_id != first_image_id:  # Skip featured image
+        if media_id in wp_media_map and media_id != first_image_id:
             wp_media_id, wp_url = wp_media_map[media_id]
             if media_type == 'IMAGE':
                 content += f'<!-- wp:image {{"id":{wp_media_id}}} --><figure class="wp-block-image"><img src="{wp_url}" alt="" class="wp-image-{wp_media_id}"/></figure><!-- /wp:image -->'
             elif media_type == 'VIDEO':
                 content += f'<!-- wp:video {{"id":{wp_media_id}}} --><figure class="wp-block-video"><video controls src="{wp_url}"></video></figure><!-- /wp:video -->'
-    content += format_caption(caption)  # Append the formatted caption
+    content += format_caption(caption)
     return content
 
 def get_pending_posts(conn):
     """Retrieve posts not yet posted to WordPress."""
     c = conn.cursor()
-    c.execute("SELECT id, caption, media_type FROM posts WHERE posted_to_wp = 0")
+    c.execute("SELECT id, caption, media_type, timestamp FROM posts WHERE posted_to_wp = 0")
     return c.fetchall()
 
 def get_media_for_post(conn, post_id):
@@ -233,20 +235,27 @@ def upload_media_to_wordpress(local_path, media_type, verbose=False):
     print(f"Error uploading {local_path}: {response.status_code}")
     return None, None
 
-def create_wordpress_post(title, content, slug, featured_media, tag_ids, verbose=False):
-    """Create a post on WordPress with tags."""
+def create_wordpress_post(title, content, slug, featured_media, tag_ids, timestamp, verbose=False):
+    """Create a post on WordPress."""
+    if timestamp:
+        dt = parser.parse(timestamp)  # Parse the original timestamp
+        formatted_timestamp = dt.isoformat()  # Convert to ISO 8601 with +00:00
+    else:
+        # Fallback to current UTC time if timestamp is missing
+        formatted_timestamp = datetime.now(timezone.utc).isoformat()
     post_data = {
         'title': title,
         'content': content,
         'slug': slug,
         'status': 'publish',
         'categories': [CATEGORY_ID],
-        'tags': tag_ids
+        'tags': tag_ids,
+        'date': formatted_timestamp
     }
     if featured_media:
         post_data['featured_media'] = featured_media
     if verbose:
-        print(f"Creating post with title '{title}'")
+        print(f"Creating post with title '{title}' and date '{formatted_timestamp}'")
     response = requests.post(
         f'{WORDPRESS_SITE_URL}/wp-json/wp/v2/posts',
         headers={'Content-Type': 'application/json'},
@@ -303,8 +312,8 @@ def post_pending_to_wordpress(conn, verbose=False, test_mode=False):
 
     auth = HTTPBasicAuth(WORDPRESS_USERNAME, WORDPRESS_APPLICATION_PASSWORD)
     for post in pending_posts:
-        post_id, caption, media_type = post
-        caption = caption or ''  # Handle None captions
+        post_id, caption, media_type, timestamp = post
+        caption = caption or ''
         title = caption.split('\n', 1)[0] if '\n' in caption else caption
         if not title:
             title = 'Untitled'
@@ -326,7 +335,7 @@ def post_pending_to_wordpress(conn, verbose=False, test_mode=False):
         tag_ids = [tag_id for tag in tags if (tag_id := get_or_create_tag(tag, auth, WORDPRESS_SITE_URL))]
 
         # Create the post
-        if create_wordpress_post(title, content, slug, featured_media, tag_ids, verbose):
+        if create_wordpress_post(title, content, slug, featured_media, tag_ids, timestamp, verbose):
             if not test_mode:
                 mark_post_as_posted(conn, post_id)
             else:
