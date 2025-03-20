@@ -8,6 +8,8 @@
     system = "x86_64-linux";
     pkgs = nixpkgs.legacyPackages.${system};
     python = pkgs.python313.withPackages (pyPkgs: [
+      pyPkgs.python-dotenv
+      pyPkgs.python-slugify
       pyPkgs.requests
     ]);
   in {
