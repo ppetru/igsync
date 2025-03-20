@@ -30,6 +30,7 @@ def init_db(db_path):
                  (id TEXT PRIMARY KEY, caption TEXT, media_type TEXT, permalink TEXT, posted_to_wp INTEGER DEFAULT 0)''')
     c.execute('''CREATE TABLE IF NOT EXISTS media
                  (media_id TEXT PRIMARY KEY, post_id TEXT, media_type TEXT, media_url TEXT, local_path TEXT,
+                  wp_media_id INTEGER, wp_url TEXT,
                   FOREIGN KEY(post_id) REFERENCES posts(id))''')
     conn.commit()
     return conn
@@ -123,9 +124,9 @@ def get_pending_posts(conn):
     return c.fetchall()
 
 def get_media_for_post(conn, post_id):
-    """Get media items for a specific post."""
+    """Get media items for a post, including wp_media_id and wp_url."""
     c = conn.cursor()
-    c.execute("SELECT media_id, media_type, local_path FROM media WHERE post_id = ?", (post_id,))
+    c.execute("SELECT media_id, media_type, local_path, wp_media_id, wp_url FROM media WHERE post_id = ?", (post_id,))
     return c.fetchall()
 
 def upload_media_to_wordpress(local_path, media_type, verbose=False):
@@ -152,6 +153,13 @@ def upload_media_to_wordpress(local_path, media_type, verbose=False):
         return data['id'], data['source_url']
     print(f"Error uploading {local_path}: {response.status_code}")
     return None, None
+
+def reset_media_uploads(conn):
+    """Reset media upload records by setting wp_media_id and wp_url to NULL."""
+    c = conn.cursor()
+    c.execute("UPDATE media SET wp_media_id = NULL, wp_url = NULL")
+    conn.commit()
+    print("Reset all media upload records.")
 
 def create_wordpress_post(title, content, slug, featured_media, verbose=False):
     """Create a post on WordPress."""
@@ -218,14 +226,25 @@ def post_pending_to_wordpress(conn, verbose=False, test_mode=False):
             print(f"Posting post {post_id} to WordPress")
         media_list = get_media_for_post(conn, post_id)
         wp_media_map = {}
+        c = conn.cursor()
         for media in media_list:
-            media_id, media_type, local_path = media
-            wp_media_id, wp_url = upload_media_to_wordpress(local_path, media_type, verbose)
-            if wp_media_id:
+            media_id, media_type, local_path, wp_media_id, wp_url = media
+            if wp_media_id:  # Media already uploaded
+                if verbose:
+                    print(f"Using existing media {media_id} with ID {wp_media_id}")
                 wp_media_map[media_id] = (wp_media_id, wp_url)
+            else:  # Upload media and store details
+                wp_media_id, wp_url = upload_media_to_wordpress(local_path, media_type, verbose)
+                if wp_media_id:
+                    c.execute("UPDATE media SET wp_media_id = ?, wp_url = ? WHERE media_id = ?",
+                              (wp_media_id, wp_url, media_id))
+                    conn.commit()
+                    if verbose:
+                        print(f"Uploaded media {media_id} with ID {wp_media_id}")
+                    wp_media_map[media_id] = (wp_media_id, wp_url)
         content = ''
         for media in media_list:
-            media_id, media_type, _ = media
+            media_id, media_type, _, _, _ = media
             if media_id in wp_media_map:
                 wp_media_id, wp_url = wp_media_map[media_id]
                 content += f'<img src="{wp_url}"><br>' if media_type == 'IMAGE' else f'[video id="{wp_media_id}"]<br>'
@@ -247,6 +266,7 @@ def main():
     parser.add_argument('--post-only', action='store_true', help="Only post to WordPress")
     parser.add_argument('--verbose', action='store_true', help="Show detailed progress")
     parser.add_argument('--test-post', action='store_true', help="Post one pending post to WordPress without marking it as posted")
+    parser.add_argument('--reset-media', action='store_true', help="Reset media upload records")
     args = parser.parse_args()
 
     # Determine actions
@@ -262,6 +282,8 @@ def main():
             fetch_and_store_instagram_posts(conn, verbose)
         if post:
             print("Posting pending posts to WordPress...")
+            if args.reset_media:
+                reset_media_uploads(conn)
             post_pending_to_wordpress(conn, verbose, args.test_post)
     finally:
         conn.close()
