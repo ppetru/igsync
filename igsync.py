@@ -15,6 +15,7 @@ INSTAGRAM_ACCESS_TOKEN = os.environ['INSTAGRAM_ACCESS_TOKEN']
 WORDPRESS_SITE_URL = os.environ['WORDPRESS_SITE_URL']
 WORDPRESS_USERNAME = os.environ['WORDPRESS_USERNAME']
 WORDPRESS_APPLICATION_PASSWORD = os.environ['WORDPRESS_APPLICATION_PASSWORD']
+CATEGORY_ID = os.environ['CATEGORY_ID']
 DB_PATH = 'instagram_posts.db'
 
 # Ensure media directory exists
@@ -163,7 +164,7 @@ def reset_media_uploads(conn):
 
 def create_wordpress_post(title, content, slug, featured_media, verbose=False):
     """Create a post on WordPress."""
-    post_data = {'title': title, 'content': content, 'slug': slug, 'status': 'publish'}
+    post_data = {'title': title, 'content': content, 'slug': slug, 'status': 'publish', 'categories': [CATEGORY_ID]}
     if featured_media:
         post_data['featured_media'] = featured_media
     if verbose:
