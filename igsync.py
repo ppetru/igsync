@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import re
 import requests
 import sqlite3
 from dotenv import load_dotenv
@@ -118,6 +119,83 @@ def get_local_path(media_id, media_type):
 
 ### WordPress Functions
 
+def extract_tags(caption):
+    """Extract hashtags from the caption."""
+    return re.findall(r'#\w+', caption)
+
+def remove_tags(caption):
+    """Remove hashtags from the caption."""
+    return re.sub(r'#\w+', '', caption).strip()
+
+def format_caption(caption):
+    """Format caption by removing tags and adding basic semantic markup."""
+    caption = remove_tags(caption)
+    # Split into lines and wrap non-empty lines in <p> tags
+    lines = caption.split('\n')
+    formatted = ''
+    for line in lines:
+        if line.strip():
+            formatted += f'<p>{line.strip()}</p>'
+    return formatted
+
+def get_or_create_tag(tag_name, auth, wordpress_url):
+    """Get tag ID if it exists, or create it and return the new ID."""
+    tag_name = tag_name.lstrip('#')
+    response = requests.get(
+        f'{wordpress_url}/wp-json/wp/v2/tags',
+        params={'search': tag_name},
+        auth=auth
+    )
+    if response.status_code == 200:
+        tags = response.json()
+        for tag in tags:
+            if tag['name'].lower() == tag_name.lower():
+                return tag['id']
+    # Tag doesn't exist, create it
+    response = requests.post(
+        f'{wordpress_url}/wp-json/wp/v2/tags',
+        json={'name': tag_name},
+        auth=auth
+    )
+    if response.status_code == 201:
+        return response.json()['id']
+    print(f"Error creating tag {tag_name}: {response.status_code}")
+    return None
+
+def handle_media(conn, media_list, verbose=False):
+    """Handle media uploads and return a mapping of media IDs to WordPress IDs and URLs."""
+    wp_media_map = {}
+    c = conn.cursor()
+    for media in media_list:
+        media_id, media_type, local_path, wp_media_id, wp_url = media
+        if wp_media_id:
+            if verbose:
+                print(f"Using existing media {media_id} with ID {wp_media_id}")
+            wp_media_map[media_id] = (wp_media_id, wp_url)
+        else:
+            wp_media_id, wp_url = upload_media_to_wordpress(local_path, media_type, verbose)
+            if wp_media_id:
+                c.execute("UPDATE media SET wp_media_id = ?, wp_url = ? WHERE media_id = ?",
+                          (wp_media_id, wp_url, media_id))
+                conn.commit()
+                if verbose:
+                    print(f"Uploaded media {media_id} with ID {wp_media_id}")
+                wp_media_map[media_id] = (wp_media_id, wp_url)
+    return wp_media_map
+
+def build_content(media_list, wp_media_map, caption, first_image_id):
+    """Build the post content excluding the featured image."""
+    content = format_caption(caption)
+    for media in media_list:
+        media_id, media_type, _, _, _ = media
+        if media_id in wp_media_map and media_id != first_image_id:
+            wp_media_id, wp_url = wp_media_map[media_id]
+            if media_type == 'IMAGE':
+                content += f'<figure><img src="{wp_url}" alt=""></figure>'
+            elif media_type == 'VIDEO':
+                content += f'[video id="{wp_media_id}"]'
+    return content
+
 def get_pending_posts(conn):
     """Retrieve posts not yet posted to WordPress."""
     c = conn.cursor()
@@ -155,16 +233,16 @@ def upload_media_to_wordpress(local_path, media_type, verbose=False):
     print(f"Error uploading {local_path}: {response.status_code}")
     return None, None
 
-def reset_media_uploads(conn):
-    """Reset media upload records by setting wp_media_id and wp_url to NULL."""
-    c = conn.cursor()
-    c.execute("UPDATE media SET wp_media_id = NULL, wp_url = NULL")
-    conn.commit()
-    print("Reset all media upload records.")
-
-def create_wordpress_post(title, content, slug, featured_media, verbose=False):
-    """Create a post on WordPress."""
-    post_data = {'title': title, 'content': content, 'slug': slug, 'status': 'publish', 'categories': [CATEGORY_ID]}
+def create_wordpress_post(title, content, slug, featured_media, tag_ids, verbose=False):
+    """Create a post on WordPress with tags."""
+    post_data = {
+        'title': title,
+        'content': content,
+        'slug': slug,
+        'status': 'publish',
+        'categories': [CATEGORY_ID],
+        'tags': tag_ids
+    }
     if featured_media:
         post_data['featured_media'] = featured_media
     if verbose:
@@ -181,6 +259,13 @@ def create_wordpress_post(title, content, slug, featured_media, verbose=False):
         return True
     print(f"Error creating post: {response.status_code} {response.text}")
     return False
+
+def reset_media_uploads(conn):
+    """Reset media upload records by setting wp_media_id and wp_url to NULL."""
+    c = conn.cursor()
+    c.execute("UPDATE media SET wp_media_id = NULL, wp_url = NULL")
+    conn.commit()
+    print("Reset all media upload records.")
 
 def mark_post_as_posted(conn, post_id):
     """Mark a post as posted to WordPress."""
@@ -215,54 +300,34 @@ def post_pending_to_wordpress(conn, verbose=False, test_mode=False):
         print(f"Found {len(pending_posts)} pending posts to process")
     if test_mode:
         pending_posts = pending_posts[:1]
+
+    auth = HTTPBasicAuth(WORDPRESS_USERNAME, WORDPRESS_APPLICATION_PASSWORD)
     for post in pending_posts:
         post_id, caption, media_type = post
-        # Extract title from caption
         caption = caption or ''  # Handle None captions
         title = caption.split('\n', 1)[0] if '\n' in caption else caption
-        if not title:  # Handle empty captions
+        if not title:
             title = 'Untitled'
         slug = slugify("Photo " + title)
         if verbose:
             print(f"Posting post {post_id} to WordPress")
+
+        # Handle media
         media_list = get_media_for_post(conn, post_id)
-        wp_media_map = {}
-        c = conn.cursor()
-        for media in media_list:
-            media_id, media_type, local_path, wp_media_id, wp_url = media
-            if wp_media_id:  # Media already uploaded
-                if verbose:
-                    print(f"Using existing media {media_id} with ID {wp_media_id}")
-                wp_media_map[media_id] = (wp_media_id, wp_url)
-            else:  # Upload media and store details
-                wp_media_id, wp_url = upload_media_to_wordpress(local_path, media_type, verbose)
-                if wp_media_id:
-                    c.execute("UPDATE media SET wp_media_id = ?, wp_url = ? WHERE media_id = ?",
-                              (wp_media_id, wp_url, media_id))
-                    conn.commit()
-                    if verbose:
-                        print(f"Uploaded media {media_id} with ID {wp_media_id}")
-                    wp_media_map[media_id] = (wp_media_id, wp_url)
+        wp_media_map = handle_media(conn, media_list, verbose)
 
-        # Find the first image for featured_media
+        # Set featured image
         first_image_id = next((m[0] for m in media_list if m[1] == 'IMAGE'), None)
         featured_media = wp_media_map.get(first_image_id, (None, None))[0] if first_image_id else None
 
-        content = ''
-        for media in media_list:
-            media_id, media_type, _, _, _ = media
-            if media_id in wp_media_map:
-                wp_media_id, wp_url = wp_media_map[media_id]
-                # Only include images that aren’t the featured one
-                if media_id != first_image_id:
-                    if media_type == 'IMAGE':
-                        content += f'<img src="{wp_url}"><br>'
-                    elif media_type == 'VIDEO':
-                        content += f'[video id="{wp_media_id}"]<br>'
-        content += caption
-        first_image_id = next((m[0] for m in media_list if m[1] == 'IMAGE'), None)
-        featured_media = wp_media_map.get(first_image_id, (None, None))[0] if first_image_id else None
-        if create_wordpress_post(title, content, slug, featured_media, verbose):
+        # Build content and handle tags
+        content = build_content(media_list, wp_media_map, caption, first_image_id)
+        tags = extract_tags(caption)
+        tags.append('#photo-post')
+        tag_ids = [tag_id for tag in tags if (tag_id := get_or_create_tag(tag, auth, WORDPRESS_SITE_URL))]
+
+        # Create the post
+        if create_wordpress_post(title, content, slug, featured_media, tag_ids, verbose):
             if not test_mode:
                 mark_post_as_posted(conn, post_id)
             else:
