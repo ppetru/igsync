@@ -127,17 +127,6 @@ def remove_tags(caption):
     """Remove hashtags from the caption."""
     return re.sub(r'#\w+', '', caption).strip()
 
-def format_caption(caption):
-    """Format caption by removing tags and adding basic semantic markup."""
-    caption = remove_tags(caption)
-    # Split into lines and wrap non-empty lines in <p> tags
-    lines = caption.split('\n')
-    formatted = ''
-    for line in lines:
-        if line.strip():
-            formatted += f'<p>{line.strip()}</p>'
-    return formatted
-
 def get_or_create_tag(tag_name, auth, wordpress_url):
     """Get tag ID if it exists, or create it and return the new ID."""
     tag_name = tag_name.lstrip('#')
@@ -183,17 +172,28 @@ def handle_media(conn, media_list, verbose=False):
                 wp_media_map[media_id] = (wp_media_id, wp_url)
     return wp_media_map
 
+def format_caption(caption):
+    """Format caption by removing tags and adding paragraph blocks."""
+    caption = remove_tags(caption)  # Assume this removes unwanted HTML tags
+    lines = caption.split('\n')     # Split caption into lines
+    formatted = ''
+    for line in lines:
+        if line.strip():  # Only process non-empty lines
+            formatted += f'<!-- wp:paragraph --><p>{line.strip()}</p><!-- /wp:paragraph -->'
+    return formatted
+
 def build_content(media_list, wp_media_map, caption, first_image_id):
-    """Build the post content excluding the featured image."""
-    content = format_caption(caption)
+    """Build the post content using block markup, excluding the featured image."""
+    content = ''
     for media in media_list:
         media_id, media_type, _, _, _ = media
-        if media_id in wp_media_map and media_id != first_image_id:
+        if media_id in wp_media_map and media_id != first_image_id:  # Skip featured image
             wp_media_id, wp_url = wp_media_map[media_id]
             if media_type == 'IMAGE':
-                content += f'<figure><img src="{wp_url}" alt=""></figure>'
+                content += f'<!-- wp:image {{"id":{wp_media_id}}} --><figure class="wp-block-image"><img src="{wp_url}" alt="" class="wp-image-{wp_media_id}"/></figure><!-- /wp:image -->'
             elif media_type == 'VIDEO':
-                content += f'[video id="{wp_media_id}"]'
+                content += f'<!-- wp:video {{"id":{wp_media_id}}} --><figure class="wp-block-video"><video controls src="{wp_url}"></video></figure><!-- /wp:video -->'
+    content += format_caption(caption)  # Append the formatted caption
     return content
 
 def get_pending_posts(conn):
