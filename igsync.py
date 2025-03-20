@@ -243,12 +243,22 @@ def post_pending_to_wordpress(conn, verbose=False, test_mode=False):
                     if verbose:
                         print(f"Uploaded media {media_id} with ID {wp_media_id}")
                     wp_media_map[media_id] = (wp_media_id, wp_url)
+
+        # Find the first image for featured_media
+        first_image_id = next((m[0] for m in media_list if m[1] == 'IMAGE'), None)
+        featured_media = wp_media_map.get(first_image_id, (None, None))[0] if first_image_id else None
+
         content = ''
         for media in media_list:
             media_id, media_type, _, _, _ = media
             if media_id in wp_media_map:
                 wp_media_id, wp_url = wp_media_map[media_id]
-                content += f'<img src="{wp_url}"><br>' if media_type == 'IMAGE' else f'[video id="{wp_media_id}"]<br>'
+                # Only include images that aren’t the featured one
+                if media_id != first_image_id:
+                    if media_type == 'IMAGE':
+                        content += f'<img src="{wp_url}"><br>'
+                    elif media_type == 'VIDEO':
+                        content += f'[video id="{wp_media_id}"]<br>'
         content += caption
         first_image_id = next((m[0] for m in media_list if m[1] == 'IMAGE'), None)
         featured_media = wp_media_map.get(first_image_id, (None, None))[0] if first_image_id else None
