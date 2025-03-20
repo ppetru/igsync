@@ -323,7 +323,6 @@ def post_pending_to_wordpress(conn, verbose=False, test_mode=False):
         # Build content and handle tags
         content = build_content(media_list, wp_media_map, caption, first_image_id)
         tags = extract_tags(caption)
-        tags.append('#photo-post')
         tag_ids = [tag_id for tag in tags if (tag_id := get_or_create_tag(tag, auth, WORDPRESS_SITE_URL))]
 
         # Create the post
