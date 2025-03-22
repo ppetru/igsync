@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import logging
 import os
 import re
 import requests
@@ -12,6 +13,9 @@ from pathlib import Path
 from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 from requests.auth import HTTPBasicAuth
 from slugify import slugify
+
+logging.basicConfig(format='%(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -43,7 +47,7 @@ def init_db(db_path):
 
 ### Instagram Functions
 
-def fetch_instagram_posts(access_token, conn, verbose=False):
+def fetch_instagram_posts(access_token, conn):
     """Fetch new Instagram posts with pagination."""
     c = conn.cursor()
     c.execute("SELECT id FROM posts")
@@ -52,11 +56,10 @@ def fetch_instagram_posts(access_token, conn, verbose=False):
     url = f'https://graph.instagram.com/me/media?fields=id,caption,media_type,media_url,permalink,timestamp&access_token={access_token}'
     page = 1
     while url:
-        if verbose:
-            print(f"Fetching page {page}...")
+        logger.debug(f"Fetching page {page}...")
         response = requests.get(url)
         if response.status_code != 200:
-            print(f"Error fetching posts: {response.status_code}")
+            logger.debug(f"Error fetching posts: {response.status_code}")
             break
         data = response.json()
         page_posts = data['data']
@@ -66,10 +69,7 @@ def fetch_instagram_posts(access_token, conn, verbose=False):
             break
         url = data['paging']['next']
         page += 1
-    if verbose:
-        print(f"Fetched {len(posts)} new posts from {page} pages")
-    elif posts:
-        print(f"Found {len(posts)} new posts")
+    logger.info(f"Fetched {len(posts)} new posts from {page} pages")
     return posts
 
 def fetch_children(post_id, access_token):
@@ -78,26 +78,23 @@ def fetch_children(post_id, access_token):
     response = requests.get(url)
     if response.status_code == 200:
         return response.json()['data']
-    print(f"Error fetching children for post {post_id}: {response.status_code}")
+    logger.debug(f"Error fetching children for post {post_id}: {response.status_code}")
     return []
 
-def download_media(media_url, local_path, verbose=False):
+def download_media(media_url, local_path):
     """Download media from Instagram."""
     if Path(local_path).exists():
-        if verbose:
-            print(f"Media {local_path} already exists, skipping download")
+        logger.debug(f"Media {local_path} already exists, skipping download")
         return
-    if verbose:
-        print(f"Downloading {media_url} to {local_path}")
+    logger.debug(f"Downloading {media_url} to {local_path}")
     response = requests.get(media_url, stream=True)
     if response.status_code == 200:
         with open(local_path, 'wb') as f:
             for chunk in response.iter_content(1024):
                 f.write(chunk)
-        if verbose:
-            print(f"Downloaded {local_path}")
+        logger.debug(f"Downloaded {local_path}")
     else:
-        print(f"Error downloading {media_url}: {response.status_code}")
+        logger.error(f"Error downloading {media_url}: {response.status_code}")
 
 ### Database Helpers
 
@@ -152,27 +149,25 @@ def get_or_create_tag(tag_name, auth, wordpress_url):
     )
     if response.status_code == 201:
         return response.json()['id']
-    print(f"Error creating tag {tag_name}: {response.status_code}")
+    logger.debug(f"Error creating tag {tag_name}: {response.status_code}")
     return None
 
-def handle_media(conn, media_list, verbose=False):
+def handle_media(conn, media_list):
     """Handle media uploads and return a mapping of media IDs to WordPress IDs and URLs."""
     wp_media_map = {}
     c = conn.cursor()
     for media in media_list:
         media_id, media_type, local_path, wp_media_id, wp_url = media
         if wp_media_id:
-            if verbose:
-                print(f"Using existing media {media_id} with ID {wp_media_id}")
+            logger.debug(f"Using existing media {media_id} with ID {wp_media_id}")
             wp_media_map[media_id] = (wp_media_id, wp_url)
         else:
-            wp_media_id, wp_url = upload_media_to_wordpress(local_path, media_type, verbose)
+            wp_media_id, wp_url = upload_media_to_wordpress(local_path, media_type)
             if wp_media_id:
                 c.execute("UPDATE media SET wp_media_id = ?, wp_url = ? WHERE media_id = ?",
                           (wp_media_id, wp_url, media_id))
                 conn.commit()
-                if verbose:
-                    print(f"Uploaded media {media_id} with ID {wp_media_id}")
+                logger.debug(f"Uploaded media {media_id} with ID {wp_media_id}")
                 wp_media_map[media_id] = (wp_media_id, wp_url)
     return wp_media_map
 
@@ -212,7 +207,7 @@ def get_media_for_post(conn, post_id):
     c.execute("SELECT media_id, media_type, local_path, wp_media_id, wp_url FROM media WHERE post_id = ?", (post_id,))
     return c.fetchall()
 
-def upload_media_to_wordpress(local_path, media_type, verbose=False):
+def upload_media_to_wordpress(local_path, media_type):
     """Upload media to WordPress."""
     content_type = 'image/jpeg' if media_type == 'IMAGE' else 'video/mp4'
     filename = 'instagram_image.jpg' if media_type == 'IMAGE' else 'instagram_video.mp4'
@@ -220,8 +215,7 @@ def upload_media_to_wordpress(local_path, media_type, verbose=False):
         'Content-Type': content_type,
         'Content-Disposition': f'attachment; filename="{filename}"'
     }
-    if verbose:
-        print(f"Uploading {local_path} to WordPress")
+    logger.debug(f"Uploading {local_path} to WordPress")
     with open(local_path, 'rb') as f:
         response = requests.post(
             f'{WORDPRESS_SITE_URL}/wp-json/wp/v2/media',
@@ -231,13 +225,12 @@ def upload_media_to_wordpress(local_path, media_type, verbose=False):
         )
     if response.status_code == 201:
         data = response.json()
-        if verbose:
-            print(f"Uploaded media ID {data['id']}")
+        logger.debug(f"Uploaded media ID {data['id']}")
         return data['id'], data['source_url']
-    print(f"Error uploading {local_path}: {response.status_code}")
+    logger.error(f"Error uploading {local_path}: {response.status_code}")
     return None, None
 
-def create_wordpress_post(title, content, slug, featured_media, tag_ids, timestamp, verbose=False):
+def create_wordpress_post(title, content, slug, featured_media, tag_ids, timestamp):
     """Create a post on WordPress."""
     if timestamp:
         dt = parser.parse(timestamp)  # Parse the original timestamp
@@ -256,8 +249,7 @@ def create_wordpress_post(title, content, slug, featured_media, tag_ids, timesta
     }
     if featured_media:
         post_data['featured_media'] = featured_media
-    if verbose:
-        print(f"Creating post with title '{title}' and date '{formatted_timestamp}'")
+    logger.debug(f"Creating post with title '{title}' and date '{formatted_timestamp}'")
     response = requests.post(
         f'{WORDPRESS_SITE_URL}/wp-json/wp/v2/posts',
         headers={'Content-Type': 'application/json'},
@@ -265,10 +257,9 @@ def create_wordpress_post(title, content, slug, featured_media, tag_ids, timesta
         auth=HTTPBasicAuth(WORDPRESS_USERNAME, WORDPRESS_APPLICATION_PASSWORD)
     )
     if response.status_code == 201:
-        if verbose:
-            print("Post created successfully")
+        logger.debug("Post created successfully")
         return True
-    print(f"Error creating post: {response.status_code} {response.text}")
+    logger.error(f"Error creating post: {response.status_code} {response.text}")
     return False
 
 def reset_media_uploads(conn):
@@ -276,7 +267,7 @@ def reset_media_uploads(conn):
     c = conn.cursor()
     c.execute("UPDATE media SET wp_media_id = NULL, wp_url = NULL")
     conn.commit()
-    print("Reset all media upload records.")
+    logger.info("Reset all media upload records.")
 
 def mark_post_as_posted(conn, post_id):
     """Mark a post as posted to WordPress."""
@@ -286,30 +277,28 @@ def mark_post_as_posted(conn, post_id):
 
 ### Main Workflow
 
-def fetch_and_store_instagram_posts(conn, verbose=False):
+def fetch_and_store_instagram_posts(conn):
     """Fetch and store new Instagram posts, returning the count."""
-    posts = fetch_instagram_posts(INSTAGRAM_ACCESS_TOKEN, conn, verbose)
+    posts = fetch_instagram_posts(INSTAGRAM_ACCESS_TOKEN, conn)
     for post in posts:
-        if verbose:
-            print(f"Processing post {post['id']}")
+        logger.debug(f"Processing post {post['id']}")
         insert_post(conn, post)
         if post['media_type'] == 'CAROUSEL_ALBUM':
             children = fetch_children(post['id'], INSTAGRAM_ACCESS_TOKEN)
             for child in children:
                 insert_media(conn, child['id'], post['id'], child['media_type'], child['media_url'])
-                download_media(child['media_url'], get_local_path(child['id'], child['media_type']), verbose)
+                download_media(child['media_url'], get_local_path(child['id'], child['media_type']))
         else:
             insert_media(conn, post['id'], post['id'], post['media_type'], post['media_url'])
-            download_media(post['media_url'], get_local_path(post['id'], post['media_type']), verbose)
-    if verbose:
-        print(f"Stored {len(posts)} new posts")
+            download_media(post['media_url'], get_local_path(post['id'], post['media_type']))
+    logger.debug(f"Stored {len(posts)} new posts")
     return len(posts)
 
-def post_pending_to_wordpress(conn, verbose=False, test_mode=False):
+def post_pending_to_wordpress(conn, test_mode=False):
     """Post pending Instagram posts to WordPress, returning the count."""
     pending_posts = get_pending_posts(conn)
-    if not verbose and pending_posts:
-        print(f"Found {len(pending_posts)} pending posts to process")
+    if pending_posts:
+        logger.info(f"Found {len(pending_posts)} pending posts to process")
     if test_mode:
         pending_posts = pending_posts[:1]
 
@@ -322,12 +311,11 @@ def post_pending_to_wordpress(conn, verbose=False, test_mode=False):
         if not title:
             title = 'Untitled'
         slug = slugify("Photo " + title)
-        if verbose:
-            print(f"Posting post {post_id} to WordPress")
+        logger.debug(f"Posting post {post_id} to WordPress")
 
         # Handle media
         media_list = get_media_for_post(conn, post_id)
-        wp_media_map = handle_media(conn, media_list, verbose)
+        wp_media_map = handle_media(conn, media_list)
 
         # Set featured image
         first_image_id = next((m[0] for m in media_list if m[1] == 'IMAGE'), None)
@@ -339,14 +327,13 @@ def post_pending_to_wordpress(conn, verbose=False, test_mode=False):
         tag_ids = [tag_id for tag in tags if (tag_id := get_or_create_tag(tag, auth, WORDPRESS_SITE_URL))]
 
         # Create the post
-        if create_wordpress_post(title, content, slug, featured_media, tag_ids, timestamp, verbose):
+        if create_wordpress_post(title, content, slug, featured_media, tag_ids, timestamp):
             if not test_mode:
                 mark_post_as_posted(conn, post_id)
             else:
-                print(f"Test post created for post_id: {post_id}. Not marking as posted.")
+                logger.info(f"Test post created for post_id: {post_id}. Not marking as posted.")
             posted_count += 1
-            if verbose:
-                print(f"Successfully posted post {post_id}")
+            logger.debug(f"Successfully posted post {post_id}")
     return posted_count
 
 def main():
@@ -363,7 +350,7 @@ def main():
     # Determine actions
     fetch = not args.post_only
     post = not args.fetch_only
-    verbose = args.verbose
+    logger.setLevel(logging.DEBUG if args.verbose else logging.INFO)
 
     # Initialize database connection
     conn = init_db(DB_PATH)
@@ -371,13 +358,13 @@ def main():
     posted_to_wordpress = 0
     try:
         if fetch:
-            print("Fetching new posts from Instagram...")
-            new_instagram_posts = fetch_and_store_instagram_posts(conn, verbose)
+            logger.info("Fetching new posts from Instagram...")
+            new_instagram_posts = fetch_and_store_instagram_posts(conn)
         if post:
-            print("Posting pending posts to WordPress...")
+            logger.info("Posting pending posts to WordPress...")
             if args.reset_media:
                 reset_media_uploads(conn)
-            posted_to_wordpress = post_pending_to_wordpress(conn, verbose, args.test_post)
+            posted_to_wordpress = post_pending_to_wordpress(conn, args.test_post)
     finally:
         conn.close()
 
@@ -390,8 +377,7 @@ def main():
         wordpress_gauge = Gauge('posted_to_wordpress', 'Number of posts successfully posted to WordPress', registry=registry)
         wordpress_gauge.set(posted_to_wordpress)
         push_to_gateway(PROMETHEUS_PUSH_GATEWAY, job='instagram_sync', registry=registry)
-        if verbose:
-            print(f"Pushed metrics to {PROMETHEUS_PUSH_GATEWAY}")
+        logger.debug(f"Pushed metrics to {PROMETHEUS_PUSH_GATEWAY}")
 
 if __name__ == '__main__':
     main()
