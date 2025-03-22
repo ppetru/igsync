@@ -1,0 +1,5 @@
+prometheus-client
+python-dateutil
+python-dotenv
+python-slugify
+requests
