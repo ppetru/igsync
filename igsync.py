@@ -9,6 +9,7 @@ from dateutil import parser
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from pathlib import Path
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 from requests.auth import HTTPBasicAuth
 from slugify import slugify
 
@@ -19,6 +20,7 @@ WORDPRESS_SITE_URL = os.environ['WORDPRESS_SITE_URL']
 WORDPRESS_USERNAME = os.environ['WORDPRESS_USERNAME']
 WORDPRESS_APPLICATION_PASSWORD = os.environ['WORDPRESS_APPLICATION_PASSWORD']
 CATEGORY_ID = os.environ['CATEGORY_ID']
+PROMETHEUS_PUSH_GATEWAY = os.environ['PROMETHEUS_PUSH_GATEWAY']
 DB_PATH = 'instagram_posts.db'
 
 # Ensure media directory exists
@@ -285,7 +287,7 @@ def mark_post_as_posted(conn, post_id):
 ### Main Workflow
 
 def fetch_and_store_instagram_posts(conn, verbose=False):
-    """Fetch and store new Instagram posts."""
+    """Fetch and store new Instagram posts, returning the count."""
     posts = fetch_instagram_posts(INSTAGRAM_ACCESS_TOKEN, conn, verbose)
     for post in posts:
         if verbose:
@@ -301,9 +303,10 @@ def fetch_and_store_instagram_posts(conn, verbose=False):
             download_media(post['media_url'], get_local_path(post['id'], post['media_type']), verbose)
     if verbose:
         print(f"Stored {len(posts)} new posts")
+    return len(posts)
 
 def post_pending_to_wordpress(conn, verbose=False, test_mode=False):
-    """Post pending Instagram posts to WordPress."""
+    """Post pending Instagram posts to WordPress, returning the count."""
     pending_posts = get_pending_posts(conn)
     if not verbose and pending_posts:
         print(f"Found {len(pending_posts)} pending posts to process")
@@ -311,6 +314,7 @@ def post_pending_to_wordpress(conn, verbose=False, test_mode=False):
         pending_posts = pending_posts[:1]
 
     auth = HTTPBasicAuth(WORDPRESS_USERNAME, WORDPRESS_APPLICATION_PASSWORD)
+    posted_count = 0
     for post in pending_posts:
         post_id, caption, media_type, timestamp = post
         caption = caption or ''
@@ -340,8 +344,10 @@ def post_pending_to_wordpress(conn, verbose=False, test_mode=False):
                 mark_post_as_posted(conn, post_id)
             else:
                 print(f"Test post created for post_id: {post_id}. Not marking as posted.")
+            posted_count += 1
             if verbose:
                 print(f"Successfully posted post {post_id}")
+    return posted_count
 
 def main():
     # Parse command-line arguments
@@ -351,6 +357,7 @@ def main():
     parser.add_argument('--verbose', action='store_true', help="Show detailed progress")
     parser.add_argument('--test-post', action='store_true', help="Post one pending post to WordPress without marking it as posted")
     parser.add_argument('--reset-media', action='store_true', help="Reset media upload records")
+    parser.add_argument('--no-prometheus', action='store_true', help="Disable Prometheus metrics pushing")
     args = parser.parse_args()
 
     # Determine actions
@@ -360,17 +367,31 @@ def main():
 
     # Initialize database connection
     conn = init_db(DB_PATH)
+    new_instagram_posts = 0
+    posted_to_wordpress = 0
     try:
         if fetch:
             print("Fetching new posts from Instagram...")
-            fetch_and_store_instagram_posts(conn, verbose)
+            new_instagram_posts = fetch_and_store_instagram_posts(conn, verbose)
         if post:
             print("Posting pending posts to WordPress...")
             if args.reset_media:
                 reset_media_uploads(conn)
-            post_pending_to_wordpress(conn, verbose, args.test_post)
+            posted_to_wordpress = post_pending_to_wordpress(conn, verbose, args.test_post)
     finally:
         conn.close()
+
+    if not args.no_prometheus:
+        registry = CollectorRegistry()
+        last_success = Gauge('last_success', 'Last time the script successfully completed', registry=registry)
+        last_success.set_to_current_time()
+        instagram_gauge = Gauge('new_instagram_posts', 'Number of new posts fetched from Instagram', registry=registry)
+        instagram_gauge.set(new_instagram_posts)
+        wordpress_gauge = Gauge('posted_to_wordpress', 'Number of posts successfully posted to WordPress', registry=registry)
+        wordpress_gauge.set(posted_to_wordpress)
+        push_to_gateway(PROMETHEUS_PUSH_GATEWAY, job='instagram_sync', registry=registry)
+        if verbose:
+            print(f"Pushed metrics to {PROMETHEUS_PUSH_GATEWAY}")
 
 if __name__ == '__main__':
     main()
