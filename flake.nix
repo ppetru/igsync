@@ -8,6 +8,7 @@
     system = "x86_64-linux";
     pkgs = nixpkgs.legacyPackages.${system};
     python = pkgs.python313.withPackages (pyPkgs: [
+      pyPkgs.black
       pyPkgs.prometheus-client
       pyPkgs.python-dateutil
       pyPkgs.python-dotenv
