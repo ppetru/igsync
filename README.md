@@ -26,7 +26,8 @@ Instagram.
    ```bash
    pip install -r requirements.txt
    ```
-### Nix users
+
+   Nix users can instead:
    ```bash
    nix develop
    ```
