@@ -7,7 +7,7 @@ import re
 import requests
 import sqlite3
 from dateutil import parser
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from pathlib import Path
 from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
@@ -44,8 +44,122 @@ def init_db(db_path):
                   wp_media_id INTEGER, wp_url TEXT,
                   FOREIGN KEY(post_id) REFERENCES posts(id))"""
     )
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS token_metadata
+                 (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)"""
+    )
     conn.commit()
     return conn
+
+
+def get_token_from_db(conn):
+    """Get Instagram token and expiration from database."""
+    c = conn.cursor()
+    c.execute(
+        "SELECT value FROM token_metadata WHERE key = 'instagram_access_token'"
+    )
+    token_row = c.fetchone()
+    c.execute(
+        "SELECT value FROM token_metadata WHERE key = 'instagram_token_expires_at'"
+    )
+    expires_row = c.fetchone()
+
+    token = token_row[0] if token_row else None
+    expires_at = None
+    if expires_row and expires_row[0]:
+        try:
+            expires_at = parser.parse(expires_row[0])
+        except:
+            logger.warning("Failed to parse token expiration date from database")
+
+    return token, expires_at
+
+
+def set_token_in_db(conn, access_token, expires_at):
+    """Store Instagram token and expiration in database."""
+    c = conn.cursor()
+    now = datetime.now(timezone.utc).isoformat()
+
+    c.execute(
+        "INSERT OR REPLACE INTO token_metadata (key, value, updated_at) VALUES (?, ?, ?)",
+        ("instagram_access_token", access_token, now),
+    )
+    c.execute(
+        "INSERT OR REPLACE INTO token_metadata (key, value, updated_at) VALUES (?, ?, ?)",
+        ("instagram_token_expires_at", expires_at.isoformat(), now),
+    )
+    conn.commit()
+    logger.info(f"Updated Instagram token in database, expires at {expires_at.isoformat()}")
+
+
+def refresh_token(current_token, conn):
+    """Refresh Instagram access token using the Graph API."""
+    url = f"https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token={current_token}"
+    logger.info("Attempting to refresh Instagram access token...")
+
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            new_token = data.get("access_token")
+            expires_in = data.get("expires_in", 60 * 24 * 60 * 60)  # Default to 60 days
+
+            expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+            set_token_in_db(conn, new_token, expires_at)
+            logger.info(f"Successfully refreshed token, valid for {expires_in // 86400} days")
+            return new_token
+        else:
+            logger.error(f"Failed to refresh token: {response.status_code}")
+            try:
+                error_data = response.json()
+                logger.error(f"Error details: {error_data}")
+            except:
+                logger.error(f"Response text: {response.text}")
+            return None
+    except Exception as e:
+        logger.error(f"Exception while refreshing token: {e}")
+        return None
+
+
+def get_active_token(conn):
+    """Get active Instagram token, with automatic refresh and fallback to .env."""
+    # Try to get token from database
+    db_token, expires_at = get_token_from_db(conn)
+
+    # Check if token needs refresh (30 days before expiration)
+    needs_refresh = False
+    if expires_at:
+        days_until_expiry = (expires_at - datetime.now(timezone.utc)).days
+        needs_refresh = days_until_expiry < 30
+        if needs_refresh:
+            logger.info(f"Token expires in {days_until_expiry} days, will attempt refresh")
+
+    # Attempt refresh if needed and we have a token
+    if db_token and needs_refresh:
+        refreshed_token = refresh_token(db_token, conn)
+        if refreshed_token:
+            return refreshed_token
+        else:
+            logger.warning("Token refresh failed, will try fallback options")
+
+    # If we have a valid DB token that doesn't need refresh, use it
+    if db_token and not needs_refresh:
+        logger.debug("Using token from database")
+        return db_token
+
+    # Fall back to .env file
+    env_token = INSTAGRAM_ACCESS_TOKEN
+    if not env_token:
+        raise ValueError("No valid Instagram token found in database or .env file")
+
+    # If .env token differs from DB token, update DB (user manually updated .env)
+    if env_token != db_token:
+        logger.info("Using token from .env file (differs from database or DB is empty)")
+        # Store with default 60-day expiration
+        default_expires = datetime.now(timezone.utc) + timedelta(days=60)
+        set_token_in_db(conn, env_token, default_expires)
+
+    return env_token
 
 
 def fetch_instagram_posts(access_token, conn):
@@ -60,7 +174,12 @@ def fetch_instagram_posts(access_token, conn):
         logger.debug(f"Fetching page {page}...")
         response = requests.get(url)
         if response.status_code != 200:
-            logger.debug(f"Error fetching posts: {response.status_code}")
+            logger.error(f"Error fetching posts: {response.status_code}")
+            try:
+                error_data = response.json()
+                logger.error(f"Error details: {error_data}")
+            except:
+                logger.error(f"Response text: {response.text}")
             break
         data = response.json()
         page_posts = data["data"]
@@ -80,7 +199,12 @@ def fetch_children(post_id, access_token):
     response = requests.get(url)
     if response.status_code == 200:
         return response.json()["data"]
-    logger.debug(f"Error fetching children for post {post_id}: {response.status_code}")
+    logger.error(f"Error fetching children for post {post_id}: {response.status_code}")
+    try:
+        error_data = response.json()
+        logger.error(f"Error details: {error_data}")
+    except:
+        logger.error(f"Response text: {response.text}")
     return []
 
 
@@ -306,12 +430,13 @@ def mark_post_as_posted(conn, post_id):
 
 def fetch_and_store_instagram_posts(conn):
     """Fetch and store new Instagram posts, returning the count."""
-    posts = fetch_instagram_posts(INSTAGRAM_ACCESS_TOKEN, conn)
+    token = get_active_token(conn)
+    posts = fetch_instagram_posts(token, conn)
     for post in posts:
         logger.debug(f"Processing post {post['id']}")
         insert_post(conn, post)
         if post["media_type"] == "CAROUSEL_ALBUM":
-            children = fetch_children(post["id"], INSTAGRAM_ACCESS_TOKEN)
+            children = fetch_children(post["id"], token)
             for child in children:
                 insert_media(
                     conn,
