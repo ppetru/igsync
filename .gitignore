@@ -2,3 +2,11 @@
 .env
 instagram_posts.db
 media/
+
+# Deployment-specific files (not pushed to GitHub upstream)
+flake-deploy.nix
+flake-deploy.nix.lock
+flake.nix.upstream
+scripts/build-and-push.sh
+result
+result-*
