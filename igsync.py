@@ -10,7 +10,12 @@ from dateutil import parser
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from pathlib import Path
-from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+from prometheus_client import (
+    CollectorRegistry,
+    Gauge,
+    push_to_gateway,
+    write_to_textfile,
+)
 from requests.auth import HTTPBasicAuth
 from slugify import slugify
 
@@ -24,7 +29,8 @@ WORDPRESS_SITE_URL = os.environ["WORDPRESS_SITE_URL"]
 WORDPRESS_USERNAME = os.environ["WORDPRESS_USERNAME"]
 WORDPRESS_APPLICATION_PASSWORD = os.environ["WORDPRESS_APPLICATION_PASSWORD"]
 CATEGORY_ID = os.environ["CATEGORY_ID"]
-PROMETHEUS_PUSH_GATEWAY = os.environ["PROMETHEUS_PUSH_GATEWAY"]
+PROMETHEUS_PUSH_GATEWAY = os.environ.get("PROMETHEUS_PUSH_GATEWAY", "")
+PROMETHEUS_TEXTFILE_PATH = os.environ.get("PROMETHEUS_TEXTFILE_PATH", "")
 DB_PATH = "instagram_posts.db"
 
 Path("media").mkdir(exist_ok=True)
@@ -510,6 +516,42 @@ def post_pending_to_wordpress(conn, test_mode=False):
     return posted_count
 
 
+def build_metrics_registry(new_instagram_posts, posted_to_wordpress, pending_posts):
+    registry = CollectorRegistry()
+    last_success = Gauge(
+        "igsync_last_success_timestamp",
+        "Last time the script successfully completed",
+        registry=registry,
+    )
+    last_success.set_to_current_time()
+    instagram_gauge = Gauge(
+        "igsync_new_instagram_posts",
+        "Number of new posts fetched from Instagram",
+        registry=registry,
+    )
+    instagram_gauge.set(new_instagram_posts)
+    wordpress_gauge = Gauge(
+        "igsync_posted_to_wordpress",
+        "Number of posts successfully posted to WordPress",
+        registry=registry,
+    )
+    wordpress_gauge.set(posted_to_wordpress)
+    pending_gauge = Gauge(
+        "igsync_wordpress_pending_posts",
+        "Number of Instagram posts not yet posted to WordPress",
+        registry=registry,
+    )
+    pending_gauge.set(pending_posts)
+    return registry
+
+
+def write_textfile_metrics(path, new_instagram_posts, posted_to_wordpress, pending_posts):
+    write_to_textfile(
+        str(path),
+        build_metrics_registry(new_instagram_posts, posted_to_wordpress, pending_posts),
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Sync Instagram posts to WordPress")
     parser.add_argument(
@@ -530,7 +572,11 @@ def main():
     parser.add_argument(
         "--no-prometheus",
         action="store_true",
-        help="Disable Prometheus metrics pushing",
+        help="Disable Prometheus metrics publishing",
+    )
+    parser.add_argument(
+        "--metrics-textfile",
+        help="Write Prometheus metrics to a node_exporter textfile path",
     )
     args = parser.parse_args()
 
@@ -541,6 +587,7 @@ def main():
     conn = init_db(DB_PATH)
     new_instagram_posts = 0
     posted_to_wordpress = 0
+    pending_posts = 0
     try:
         if fetch:
             logger.info("Fetching new posts from Instagram...")
@@ -550,33 +597,27 @@ def main():
             if args.reset_media:
                 reset_media_uploads(conn)
             posted_to_wordpress = post_pending_to_wordpress(conn, args.test_post)
+        pending_posts = len(get_pending_posts(conn))
     finally:
         conn.close()
 
     if not args.no_prometheus:
-        registry = CollectorRegistry()
-        last_success = Gauge(
-            "last_success",
-            "Last time the script successfully completed",
-            registry=registry,
-        )
-        last_success.set_to_current_time()
-        instagram_gauge = Gauge(
-            "new_instagram_posts",
-            "Number of new posts fetched from Instagram",
-            registry=registry,
-        )
-        instagram_gauge.set(new_instagram_posts)
-        wordpress_gauge = Gauge(
-            "posted_to_wordpress",
-            "Number of posts successfully posted to WordPress",
-            registry=registry,
-        )
-        wordpress_gauge.set(posted_to_wordpress)
-        push_to_gateway(
-            PROMETHEUS_PUSH_GATEWAY, job="instagram_sync", registry=registry
-        )
-        logger.debug(f"Pushed metrics to {PROMETHEUS_PUSH_GATEWAY}")
+        metrics_textfile = args.metrics_textfile or PROMETHEUS_TEXTFILE_PATH
+        if metrics_textfile:
+            write_textfile_metrics(
+                metrics_textfile, new_instagram_posts, posted_to_wordpress, pending_posts
+            )
+            logger.debug(f"Wrote metrics to {metrics_textfile}")
+        elif PROMETHEUS_PUSH_GATEWAY:
+            registry = build_metrics_registry(
+                new_instagram_posts, posted_to_wordpress, pending_posts
+            )
+            push_to_gateway(
+                PROMETHEUS_PUSH_GATEWAY, job="instagram_sync", registry=registry
+            )
+            logger.debug(f"Pushed metrics to {PROMETHEUS_PUSH_GATEWAY}")
+        else:
+            logger.debug("No Prometheus metrics destination configured")
 
 
 if __name__ == "__main__":

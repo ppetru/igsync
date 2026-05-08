@@ -7,14 +7,14 @@ Instagram.
 - Fetches new posts via the Instagram Graph API
 - Posts to WordPress with original timestamps, media, and tags
 - Avoids duplicate media uploads to WordPress
-- Pushes monitoring metrics to Prometheus
+- Publishes monitoring metrics for Prometheus
 
 ## Prerequisites
 
 - **Python 3.6 or later**
 - A **WordPress site** with the REST API enabled
 - An **Instagram account** with access to the Instagram Graph API
-- A **Prometheus push gateway** (optional, for metrics)
+- A **Prometheus Pushgateway** or node_exporter textfile collector (optional, for metrics)
 
 ## Installation
 
@@ -52,7 +52,8 @@ The script uses environment variables stored in the `.env` file.
 - `WORDPRESS_USERNAME`: WordPress username
 - `WORDPRESS_APPLICATION_PASSWORD`: WordPress application password
 - `CATEGORY_ID`: The ID of the WordPress category to set on posts
-- `PROMETHEUS_PUSH_GATEWAY`: Prometheus push gateway URL (optional)
+- `PROMETHEUS_PUSH_GATEWAY`: Prometheus Pushgateway URL (optional)
+- `PROMETHEUS_TEXTFILE_PATH`: node_exporter textfile path for Prometheus metrics (optional)
 
 You can also tweak the script’s behavior by editing `igsync.py` directly.
 

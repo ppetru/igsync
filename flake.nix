@@ -1,5 +1,5 @@
 # ABOUTME: Nix packaging for the IGSync Instagram-to-WordPress sync script.
-# ABOUTME: Exposes the runtime package used by alo-cluster and a matching dev shell.
+# ABOUTME: Exposes the runtime package, app entrypoint, checks, and development shell.
 {
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
@@ -49,6 +49,7 @@
         CATEGORY_ID=1 \
         PROMETHEUS_PUSH_GATEWAY=http://127.0.0.1:1 \
         ${igsync}/bin/igsync --help >/dev/null
+      IGSYNC_SOURCE=${./igsync.py} ${runtimePython}/bin/python -m unittest discover -s ${./tests}
       touch $out
     '';
 
