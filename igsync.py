@@ -486,6 +486,9 @@ def post_pending_to_wordpress(conn, test_mode=False):
 
         media_list = get_media_for_post(conn, post_id)
         wp_media_map = handle_media(conn, media_list)
+        if len(wp_media_map) != len(media_list):
+            logger.error(f"Media upload failed for post {post_id}; leaving it pending")
+            continue
 
         first_image_id = next((m[0] for m in media_list if m[1] == "IMAGE"), None)
         featured_media = (

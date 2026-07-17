@@ -6,6 +6,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 IGSYNC_SOURCE = Path(
@@ -53,6 +54,37 @@ class MetricsTextfileTest(unittest.TestCase):
         self.assertIn("igsync_wordpress_pending_posts 3.0\n", content)
         self.assertNotRegex(content, r"(?m)^new_instagram_posts ")
         self.assertNotRegex(content, r"(?m)^posted_to_wordpress ")
+
+    def test_keeps_post_pending_when_expected_media_upload_fails(self):
+        module = self.load_module()
+        conn = module.init_db(":memory:")
+        module.insert_post(
+            conn,
+            {
+                "id": "post-1",
+                "caption": "Caption",
+                "media_type": "IMAGE",
+                "permalink": "https://instagram.example/post-1",
+                "timestamp": "2026-07-16T20:00:00Z",
+            },
+        )
+        module.insert_media(
+            conn,
+            "media-1",
+            "post-1",
+            "IMAGE",
+            "https://instagram.example/media-1.jpg",
+        )
+
+        with patch.object(
+            module, "upload_media_to_wordpress", return_value=(None, None)
+        ), patch.object(module, "create_wordpress_post") as create_post:
+            posted_count = module.post_pending_to_wordpress(conn)
+
+        self.assertEqual(posted_count, 0)
+        self.assertEqual(module.get_pending_posts(conn)[0][0], "post-1")
+        create_post.assert_not_called()
+        conn.close()
 
 
 if __name__ == "__main__":
