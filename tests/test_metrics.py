@@ -55,6 +55,18 @@ class MetricsTextfileTest(unittest.TestCase):
         self.assertNotRegex(content, r"(?m)^new_instagram_posts ")
         self.assertNotRegex(content, r"(?m)^posted_to_wordpress ")
 
+    def test_includes_featured_image_in_post_content(self):
+        module = self.load_module()
+
+        content = module.build_content(
+            [("media-1", "IMAGE", "media/image.jpg", None, None)],
+            {"media-1": (42, "https://example.com/image.jpg")},
+            "Caption",
+        )
+
+        self.assertIn('class="wp-image-42"', content)
+        self.assertIn("Caption", content)
+
     def test_keeps_post_pending_when_expected_media_upload_fails(self):
         module = self.load_module()
         conn = module.init_db(":memory:")

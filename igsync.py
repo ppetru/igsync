@@ -329,12 +329,12 @@ def format_caption(caption):
     return formatted
 
 
-def build_content(media_list, wp_media_map, caption, first_image_id):
-    """Build the post content using block markup, excluding the featured image."""
+def build_content(media_list, wp_media_map, caption):
+    """Build the post content using block markup."""
     content = ""
     for media in media_list:
         media_id, media_type, _, _, _ = media
-        if media_id in wp_media_map and media_id != first_image_id:
+        if media_id in wp_media_map:
             wp_media_id, wp_url = wp_media_map[media_id]
             if media_type == "IMAGE":
                 content += f'<!-- wp:image {{"id":{wp_media_id}}} --><figure class="wp-block-image"><img src="{wp_url}" alt="" class="wp-image-{wp_media_id}"/></figure><!-- /wp:image -->'
@@ -497,7 +497,7 @@ def post_pending_to_wordpress(conn, test_mode=False):
             else None
         )
 
-        content = build_content(media_list, wp_media_map, caption, first_image_id)
+        content = build_content(media_list, wp_media_map, caption)
         tags = extract_tags(caption)
         tag_ids = [
             tag_id
